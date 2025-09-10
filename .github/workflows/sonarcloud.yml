@@ -104,6 +104,9 @@ jobs:
           #   api.github.com
           #   uploads.github.com
           #   objects.githubusercontent.com
+          #   dist.nuget.org
+          #   api.nuget.org
+          #   globalcdn.nuget.org
 
       # Do not persist the GITHUB_TOKEN into the repo (reduces risk in later steps)
       - name: Checkout (no persisted creds)
@@ -111,6 +114,24 @@ jobs:
         with:
           fetch-depth: 0                 # Full history improves blame/issue precision
           persist-credentials: false     # Do not leave a token in .git/config
+
+      # Cache the packages/ folder used by packages.config projects to speed up subsequent builds
+      # NOTE: We use a tag here for reliability; if you require pin-by-SHA, replace @v4 with a specific commit SHA.
+      - name: Cache NuGet packages folder (packages.config)
+        uses: actions/cache@v4
+        with:
+          path: packages
+          key: packages-${{ runner.os }}-${{ hashFiles('**/packages.config') }}
+          restore-keys: |
+            packages-${{ runner.os }}-
+
+      # Restore NuGet packages for packages.config projects (creates ./packages)
+      - name: NuGet restore (packages.config)
+        shell: pwsh
+        run: |
+          $nuget = "$env:RUNNER_TEMP\nuget.exe"
+          Invoke-WebRequest -Uri https://dist.nuget.org/win-x86-commandline/latest/nuget.exe -OutFile $nuget
+          & $nuget restore "$env:SOLUTION_FILE" -NonInteractive -Verbosity normal
 
       # Put MSBuild (VS 2022) on PATH and prefer 64-bit
       - name: Setup MSBuild (x64)
