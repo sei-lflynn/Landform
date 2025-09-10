@@ -1,4 +1,4 @@
-# SonarCloud analysis for a tiny C repo (single main.c)
+# SonarCloud analysis for C# repo that compiles with VS 2019 (hopefully works with VS 2022 also)
 # -----------------------------------------------------------------------------
 # What this does:
 #   1) Builds the code under Sonar's Build Wrapper (produces compile_commands.json)
@@ -21,219 +21,228 @@
 #       sonar.projectKey=<your_sonarcloud_project_key>
 #       sonar.organization=<your_sonarcloud_org_key>
 #       sonar.sources=.
-#   • A file named main.c at repo root (adjust paths/commands if different)
+#   • More requirements described below
 #
 # Secret needed:
 #   • SONAR_TOKEN (Actions → Secrets) – a SonarCloud user token with access to the project
 
-name: SonarCloud (C)
+# SonarCloud analysis for a .NET/MSBuild repo (Windows/VS2022)
+# -----------------------------------------------------------------------------
+# Key principles kept from your C workflow:
+#   • Default-deny perms; elevate only in the upload job
+#   • Pinned actions by commit SHA
+#   • Hardened egress (audit mode by default)
+#   • Concurrency + timeouts
+#   • No persisted checkout creds
+#   • Clear PR triggers
+#
+# Notes:
+#   • Uses GitHub-hosted Windows 2022 runner (includes Visual Studio 2022).
+#   • Uses SonarScanner for .NET (begin → msbuild → end).
+#   • Still generates SARIF from SonarCloud issues and publishes to Code Scanning.
+
+name: SonarCloud (.NET / MSBuild on Windows)
 
 on:
   push:
     branches: [ "main" ]
-    # Trigger only when C sources, the workflow, or Sonar properties change
     # paths:
-    #  - '**/*.c'
-    #  - 'sonar-project.properties'
-    #  - '.github/workflows/sonarcloud.yml'
+    #   - '**/*.sln'
+    #   - '**/*.csproj'
+    #   - '**/*.vbproj'
+    #   - '**/*.props'
+    #   - '**/*.targets'
+    #   - 'sonar-project.properties'
+    #   - '.github/workflows/sonarcloud-dotnet.yml'
   pull_request:
     branches: [ "main" ]
     types: [opened, synchronize, reopened]
     # paths:
-    #  - '**/*.c'
-    #  - 'sonar-project.properties'
-    #  - '.github/workflows/sonarcloud.yml'
+    #   - '**/*.sln'
+    #   - '**/*.csproj'
+    #   - '**/*.vbproj'
+    #   - '**/*.props'
+    #   - '**/*.targets'
+    #   - 'sonar-project.properties'
+    #   - '.github/workflows/sonarcloud-dotnet.yml'
   # workflow_dispatch:
 
-# Cancel older in‑flight runs of the same ref. Avoids CI pile‑ups on active PRs.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
   cancel-in-progress: true
 
-# Default‑deny: grant only read by default at the workflow level.
 permissions:
   contents: read
 
 jobs:
-  # Job 1: build + scan + export SARIF (no write scopes here)
   build-and-scan:
-    name: Build and analyze
-    runs-on: ubuntu-24.04            # Explicit runner version for reproducibility
-    timeout-minutes: 15              # Cap wall‑clock time for the job
+    name: Build and analyze (Windows/VS2022)
+    runs-on: windows-2022                # GitHub-hosted Windows Server 2022 + VS 2022
+    timeout-minutes: 25
     permissions:
-      contents: read                 # Read‑only; no secret write scopes here
+      contents: read
     env:
-      BW_OUT: bw-out                 # Directory where the Build Wrapper writes output
+      # Provide paths if you want; by default we build the solution at repo root.
+      SOLUTION_FILE: '**/*.sln'
 
     steps:
-      # Lock down outbound network. Start in audit mode; switch to block + allowlist later.
       - name: Harden runner (audit egress)
         uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
         with:
           egress-policy: audit
-          # When the workflow is stable, prefer:
+          # When stable, prefer:
           # egress-policy: block
           # allowed-endpoints: >
           #   sonarcloud.io
           #   api.sonarcloud.io
-          #   binaries.sonarsource.com
           #   github.com
           #   api.github.com
           #   uploads.github.com
           #   objects.githubusercontent.com
 
-      # Do not persist the GITHUB_TOKEN into the repo (reduces risk in later steps)
       - name: Checkout (no persisted creds)
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          fetch-depth: 0              # Full history improves blame/issue precision
-          persist-credentials: false  # Do not leave a token in .git/config
+          fetch-depth: 0
+          persist-credentials: false
 
-      # Install Sonar's Build Wrapper (wraps compiler and emits compile_commands.json)
-      - name: Install Build Wrapper
-        uses: SonarSource/sonarqube-scan-action/install-build-wrapper@1a6d90ebcb0e6a6b1d87e37ba693fe453195ae25 # v5.3.1
-        # For SonarCloud, no SONAR_HOST_URL env is required; action defaults to sonarcloud.io
-
-      # Compile under the Build Wrapper. This produces BW_OUT/compile_commands.json that the C analyzer needs.
-      # Note: This command compiles and links a tiny program. For real builds, run your actual build here (make, cmake, etc.).
-      - name: Wrap compile (gcc)
-        run: |
-          set -euxo pipefail
-          mkdir -p "${BW_OUT}"
-          # Build Wrapper captures the compile so the analyzer knows exactly how files were built
-          build-wrapper-linux-x86-64 --out-dir "${BW_OUT}" \
-            sh -c 'gcc -std=c17 -I. -O2 -g main.c -o main'
-        timeout-minutes: 5
-
-      # Fail fast if the wrapper didn't produce the expected file
-      - name: Verify compile_commands.json exists
-        run: |
-          set -eux
-          ls -l "${BW_OUT}"
-          test -s "${BW_OUT}/compile_commands.json"
-
-      # Run the scanner. It reads sonar-project.properties for org/project.
-      # We pass the path to compile_commands.json so the CFamily analyzer can do its job.
-      - name: SonarCloud scan
-        uses: SonarSource/sonarqube-scan-action@1a6d90ebcb0e6a6b1d87e37ba693fe453195ae25 # v5.3.1
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}  # SonarCloud user token; no GitHub write scope needed
+        # Put MSBuild (VS 2022) on PATH and prefer 64-bit
+      - name: Setup MSBuild (x64)
+        uses: microsoft/setup-msbuild@6fb022260eb8f8bb1b611d3aa0f8f04f15b4a1c6 # v2
         with:
-          args: >
-            --define sonar.cfamily.compile-commands=${{ env.BW_OUT }}/compile_commands.json
+          msbuild-architecture: x64
 
-      # Convert SonarCloud issues → SARIF so GitHub Code Scanning can ingest them.
-      # Why a custom step? SonarCloud doesn’t publish SARIF directly, so we fetch issues via API and transcode.
-      - name: Generate SARIF from SonarCloud issues
+      # Begin SonarScanner for .NET
+      - name: SonarScanner begin
+        shell: pwsh
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          # Fetch unresolved SonarCloud issues for the most recent analysis of this project
-          # and write a minimal SARIF 2.1.0 file at reports/sonarcloud.sarif
-          import base64, json, os, time, urllib.parse, urllib.request, pathlib, sys
+          dotnet tool install --global dotnet-sonarscanner --version 9.*
+          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
+          dotnet-sonarscanner begin `
+            /k:"$(Select-String -Path sonar-project.properties -Pattern '^sonar\.projectKey=(.+)$').Matches.Groups[1].Value" `
+            /o:"$(Select-String -Path sonar-project.properties -Pattern '^sonar\.organization=(.+)$').Matches.Groups[1].Value" `
+            /d:sonar.host.url="https://sonarcloud.io" `
+            /d:sonar.verbose=true
 
-          def read_project_key():
-              with open("sonar-project.properties", "r", encoding="utf-8") as f:
-                  for line in f:
-                      line=line.strip()
-                      if line.startswith("sonar.projectKey="):
-                          return line.split("=",1)[1].strip()
-              raise RuntimeError("sonar.projectKey not found in sonar-project.properties")
+      # Build with MSBuild. If you need a specific configuration/platform, adjust below.
+      - name: Build solution (MSBuild)
+        shell: pwsh
+        run: |
+          $sln = (Get-ChildItem -Path . -Recurse -Include $env:SOLUTION_FILE -File | Select-Object -First 1).FullName
+          if (-not $sln) { throw "No solution file found matching pattern $env:SOLUTION_FILE" }
+          msbuild "$sln" /t:Rebuild /p:Configuration=Release /m
 
-          def get_json(url, token):
-              req = urllib.request.Request(url)
-              auth = base64.b64encode((token + ":").encode()).decode()
-              req.add_header("Authorization", "Basic " + auth)
-              with urllib.request.urlopen(req, timeout=30) as r:
-                  return json.load(r)
+      # End SonarScanner for .NET (submits analysis)
+      - name: SonarScanner end
+        shell: pwsh
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
+          dotnet-sonarscanner end /d:sonar.login="$env:SONAR_TOKEN"
 
-          base = "https://sonarcloud.io"
-          token = os.environ["SONAR_TOKEN"]
-          project_key = read_project_key()
-          print(f"Project: {project_key}")
+      # Wait for CE task, pull issues via API, convert to SARIF, and save as artifact
+      - name: Generate SARIF from SonarCloud issues
+        shell: pwsh
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          Set-StrictMode -Version Latest
+          New-Item -ItemType Directory -Force -Path reports | Out-Null
+          $py = @"
+import base64, json, os, time, urllib.parse, urllib.request, pathlib, sys
 
-          # Wait until the most recent Compute Engine (CE) task has finished
-          for _ in range(120):  # ~6 minutes max
-              act = get_json(f"{base}/api/ce/activity?component={urllib.parse.quote(project_key)}&onlyCurrents=true&ps=1", token)
-              tasks = act.get("tasks", [])
-              if tasks:
-                  tid = tasks[0]["id"]
-                  ce = get_json(f"{base}/api/ce/task?id={tid}", token)
-                  status = ce["task"]["status"]
-                  print(f"CE status: {status}")
-                  if status in ("SUCCESS", "FAILED", "CANCELED"):
-                      break
-              else:
-                  print("No CE tasks yet")
-              time.sleep(3)
+def read_prop(k):
+    with open("sonar-project.properties","r",encoding="utf-8") as f:
+        for line in f:
+            line=line.strip()
+            if line.startswith(k+"="):
+                return line.split("=",1)[1].strip()
+    raise RuntimeError(f"{k} not found in sonar-project.properties")
 
-          # Pull unresolved issues for the current branch/analysis
-          p=1; page_size=500; issues=[]
-          while True:
-              data = get_json(f"{base}/api/issues/search?componentKeys={urllib.parse.quote(project_key)}&resolved=false&ps={page_size}&p={p}", token)
-              batch = data.get("issues", [])
-              if not batch:
-                  break
-              issues.extend(batch)
-              total = data.get("total", 0)
-              if p*page_size >= total:
-                  break
-              p += 1
+def get_json(url, token):
+    req = urllib.request.Request(url)
+    auth = base64.b64encode((token + ":").encode()).decode()
+    req.add_header("Authorization", "Basic " + auth)
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.load(r)
 
-          def level(sev):
-              return {"BLOCKER":"error","CRITICAL":"error","MAJOR":"warning","MINOR":"note","INFO":"note"}.get(sev,"warning")
+base = "https://sonarcloud.io"
+token = os.environ["SONAR_TOKEN"]
+project_key = read_prop("sonar.projectKey")
+print(f"Project: {project_key}")
 
-          runs = [{
-              "tool": {
-                  "driver": {
-                      "name": "SonarCloud",
-                      "informationUri": "https://sonarcloud.io",
-                      "rules": []
-                  }
-              },
-              "results": []
-          }]
+# Wait for most recent CE task to finish
+for _ in range(120):
+    act = get_json(f"{base}/api/ce/activity?component={urllib.parse.quote(project_key)}&onlyCurrents=true&ps=1", token)
+    tasks = act.get("tasks", [])
+    if tasks:
+        tid = tasks[0]["id"]
+        ce = get_json(f"{base}/api/ce/task?id={tid}", token)
+        status = ce["task"]["status"]
+        print("CE status:", status)
+        if status in ("SUCCESS", "FAILED", "CANCELED"):
+            break
+    else:
+        print("No CE tasks yet")
+    time.sleep(3)
 
-          rule_added = set()
-          for it in issues:
-              rid = str(it.get("rule","unknown"))
-              if rid not in rule_added:
-                  runs[0]["tool"]["driver"]["rules"].append({
-                      "id": rid,
-                      "shortDescription": {"text": (it.get("message","") or "")[:120]}
-                  })
-                  rule_added.add(rid)
-              comp = it.get("component","")
-              path = comp.split(":",1)[1] if ":" in comp else comp
-              tr = it.get("textRange") or {}
-              sl = tr.get("startLine", 1)
-              sc = (tr.get("startOffset",0) or 0) + 1
-              el = tr.get("endLine", sl)
-              ec = max(tr.get("endOffset", sc), sc)
-              runs[0]["results"].append({
-                  "ruleId": rid,
-                  "level": level(it.get("severity","MAJOR")),
-                  "message": {"text": it.get("message","")},
-                  "locations": [{
-                      "physicalLocation": {
-                          "artifactLocation": {"uri": path, "uriBaseId": "PROJECT_ROOT"},
-                          "region": {"startLine": sl, "startColumn": sc, "endLine": el, "endColumn": ec}
-                      }
-                  }],
-                  "fingerprints": {"sonarIssueKey": it.get("key","")}
-              })
+# Pull unresolved issues
+p=1; page_size=500; issues=[]
+while True:
+    data = get_json(f"{base}/api/issues/search?componentKeys={urllib.parse.quote(project_key)}&resolved=false&ps={page_size}&p={p}", token)
+    batch = data.get("issues", [])
+    if not batch: break
+    issues.extend(batch)
+    total = data.get("total", 0)
+    if p*page_size >= total: break
+    p += 1
 
-          pathlib.Path("reports").mkdir(parents=True, exist_ok=True)
-          sarif = {"version":"2.1.0", "$schema":"https://json.schemastore.org/sarif-2.1.0.json", "runs": runs}
-          with open("reports/sonarcloud.sarif","w",encoding="utf-8") as f:
-              json.dump(sarif, f, ensure_ascii=False)
-          print(f"Wrote {len(issues)} issues to reports/sonarcloud.sarif")
-          PY
-        timeout-minutes: 3
+def level(sev):
+    return {"BLOCKER":"error","CRITICAL":"error","MAJOR":"warning","MINOR":"note","INFO":"note"}.get(sev,"warning")
 
-      # Keep an auditable copy of the SARIF. Do not upload secrets.
+runs=[{"tool":{"driver":{"name":"SonarCloud","informationUri":"https://sonarcloud.io","rules":[]}},"results":[]}]
+
+rule_added=set()
+for it in issues:
+    rid=str(it.get("rule","unknown"))
+    if rid not in rule_added:
+        runs[0]["tool"]["driver"]["rules"].append({
+            "id": rid,
+            "shortDescription": {"text": (it.get("message","") or "")[:120]}
+        })
+        rule_added.add(rid)
+    comp = it.get("component","")
+    path = comp.split(":",1)[1] if ":" in comp else comp
+    tr = it.get("textRange") or {}
+    sl = tr.get("startLine", 1)
+    sc = (tr.get("startOffset",0) or 0) + 1
+    el = tr.get("endLine", sl)
+    ec = max(tr.get("endOffset", sc), sc)
+    runs[0]["results"].append({
+        "ruleId": rid,
+        "level": level(it.get("severity","MAJOR")),
+        "message": {"text": it.get("message","")},
+        "locations": [{
+            "physicalLocation": {
+                "artifactLocation": {"uri": path, "uriBaseId": "PROJECT_ROOT"},
+                "region": {"startLine": sl, "startColumn": sc, "endLine": el, "endColumn": ec}
+            }
+        }],
+        "fingerprints": {"sonarIssueKey": it.get("key","")}
+    })
+
+pathlib.Path("reports").mkdir(parents=True, exist_ok=True)
+sarif={"version":"2.1.0","$schema":"https://json.schemastore.org/sarif-2.1.0.json","runs":runs}
+with open("reports/sonarcloud.sarif","w",encoding="utf-8") as f:
+    json.dump(sarif, f, ensure_ascii=False)
+print(f"Wrote {len(issues)} issues to reports/sonarcloud.sarif")
+"@
+          Set-Content -Path reports\generate_sarif.py -Value $py -Encoding UTF8
+          python reports\generate_sarif.py
+
       - name: Upload SARIF as artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -242,15 +251,14 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  # Job 2: upload SARIF to GitHub Code Scanning with the only write scope it needs
   upload-to-code-scanning:
     name: Publish SARIF to Code Scanning
-    needs: build-and-scan               # Run only after SARIF is produced
-    runs-on: ubuntu-24.04
+    needs: build-and-scan
+    runs-on: windows-2022
     timeout-minutes: 5
     permissions:
       contents: read
-      security-events: write            # Narrow write scope to this tiny, isolated job
+      security-events: write
       actions: read
     steps:
       - name: Harden runner (audit egress)
