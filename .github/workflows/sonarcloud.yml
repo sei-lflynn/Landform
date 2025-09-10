@@ -48,7 +48,7 @@ on:
     branches: [ "main" ]
     # Trigger only when .NET/MSBuild sources, the workflow, or Sonar properties change
     # paths:
-    #   - '**/*.sln'
+    #   - 'Landform.sln'
     #   - '**/*.csproj'
     #   - '**/*.vbproj'
     #   - '**/*.props'
@@ -59,7 +59,7 @@ on:
     branches: [ "main" ]
     types: [opened, synchronize, reopened]
     # paths:
-    #   - '**/*.sln'
+    #   - 'Landform.sln'
     #   - '**/*.csproj'
     #   - '**/*.vbproj'
     #   - '**/*.props'
@@ -86,8 +86,8 @@ jobs:
     permissions:
       contents: read                     # Read-only; no secret write scopes here
     env:
-      # Provide paths if you want; by default we build the first solution found.
-      SOLUTION_FILE: '**/*.sln'
+      # We will build this specific solution at the repo root.
+      SOLUTION_FILE: 'Landform.sln'
 
     steps:
       # Lock down outbound network. Start in audit mode; switch to block + allowlist later.
@@ -137,12 +137,12 @@ jobs:
             /d:sonar.host.url="https://sonarcloud.io" `
             /d:sonar.verbose=true
 
-      # Build with MSBuild. If you need a specific configuration/platform, adjust below.
+      # Build Landform.sln with MSBuild
       - name: Build solution (MSBuild)
         shell: pwsh
         run: |
-          $sln = (Get-ChildItem -Path . -Recurse -Include $env:SOLUTION_FILE -File | Select-Object -First 1).FullName
-          if (-not $sln) { throw "No solution file found matching pattern $env:SOLUTION_FILE" }
+          $sln = Resolve-Path "$env:SOLUTION_FILE"
+          Write-Host "Building $sln"
           msbuild "$sln" /t:Rebuild /p:Configuration=Release /m
 
       # End SonarScanner for .NET (submits analysis)
@@ -156,7 +156,8 @@ jobs:
 
       # Convert SonarCloud issues → SARIF so GitHub Code Scanning can ingest them.
       # Why a custom step? SonarCloud doesn’t publish SARIF directly, so we fetch issues via API and transcode.
-      # We write the Python to a file with an unquoted heredoc (EOF) to avoid YAML parser edge cases.
+      # Use a Bash heredoc. IMPORTANT: keep the indentation of the heredoc body and terminator
+      # exactly the same as the 'cat' line so YAML keeps them in the run block.
       - name: Generate SARIF from SonarCloud issues
         shell: bash
         env:
