@@ -53,7 +53,6 @@ on:
     #   - '**/*.vbproj'
     #   - '**/*.props'
     #   - '**/*.targets'
-    #   - 'sonar-project.properties'
     #   - '.github/workflows/sonarcloud-dotnet.yml'
   pull_request:
     branches: [ "main" ]
@@ -64,7 +63,6 @@ on:
     #   - '**/*.vbproj'
     #   - '**/*.props'
     #   - '**/*.targets'
-    #   - 'sonar-project.properties'
     #   - '.github/workflows/sonarcloud-dotnet.yml'
   # workflow_dispatch:
 
@@ -115,6 +113,31 @@ jobs:
           fetch-depth: 0                 # Full history improves blame/issue precision
           persist-credentials: false     # Do not leave a token in .git/config
 
+      # MSBuild scanner rule: it will FAIL if any sonar-project.properties exists in the repo.
+      # We read the needed keys from the file(s) once, export them into the job environment,
+      # then remove ALL sonar-project.properties files before running 'begin'.
+      - name: Extract Sonar keys and remove sonar-project.properties (required for MSBuild scanner)
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path . -Recurse -Filter 'sonar-project.properties' -File
+          if ($files) {
+            # Read first file for keys (usually root); later files typically repeat the same values.
+            $text = Get-Content -Path $files[0].FullName -Raw
+            $proj = ($text | Select-String -Pattern '^sonar\.projectKey=(.+)$').Matches.Groups[1].Value
+            $org  = ($text | Select-String -Pattern '^sonar\.organization=(.+)$').Matches.Groups[1].Value
+            if ($proj) { Add-Content $env:GITHUB_ENV "SONAR_PROJECT_KEY=$proj" }
+            if ($org)  { Add-Content $env:GITHUB_ENV "SONAR_ORG=$org" }
+            # Remove every sonar-project.properties to satisfy the MSBuild scanner
+            $files | ForEach-Object { Remove-Item $_.FullName -Force }
+          }
+          # Optional: allow secrets to override (useful if you remove the file from the repo later)
+          if ($env:SONAR_PROJECT_KEY -eq $null -or $env:SONAR_PROJECT_KEY -eq '') {
+            if ($env:SONAR_PROJECT_KEY_SECRET) { Add-Content $env:GITHUB_ENV "SONAR_PROJECT_KEY=$env:SONAR_PROJECT_KEY_SECRET" }
+          }
+          if ($env:SONAR_ORG -eq $null -or $env:SONAR_ORG -eq '') {
+            if ($env:SONAR_ORG_SECRET) { Add-Content $env:GITHUB_ENV "SONAR_ORG=$env:SONAR_ORG_SECRET" }
+          }
+
       # Cache the packages/ folder used by packages.config projects to speed up subsequent builds
       # NOTE: We use a tag here for reliability; if you require pin-by-SHA, replace @v4 with a specific commit SHA.
       - name: Cache NuGet packages folder (packages.config)
@@ -145,16 +168,13 @@ jobs:
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}   # SonarCloud user token; no GitHub write scope needed
         run: |
+          if (-not $env:SONAR_PROJECT_KEY) { throw "SONAR_PROJECT_KEY not set; ensure it was read from sonar-project.properties or provided via secrets." }
+          if (-not $env:SONAR_ORG)         { throw "SONAR_ORG not set; ensure it was read from sonar-project.properties or provided via secrets." }
           dotnet tool install --global dotnet-sonarscanner --version 9.*
           $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
-          # Read keys from sonar-project.properties to keep a single source of truth
-          $projectKey = (Select-String -Path sonar-project.properties -Pattern '^sonar\.projectKey=(.+)$').Matches.Groups[1].Value
-          $orgKey     = (Select-String -Path sonar-project.properties -Pattern '^sonar\.organization=(.+)$').Matches.Groups[1].Value
-          if (-not $projectKey) { throw "sonar.projectKey not found in sonar-project.properties" }
-          if (-not $orgKey)     { throw "sonar.organization not found in sonar-project.properties" }
           dotnet-sonarscanner begin `
-            /k:"$projectKey" `
-            /o:"$orgKey" `
+            /k:"$env:SONAR_PROJECT_KEY" `
+            /o:"$env:SONAR_ORG" `
             /d:sonar.host.url="https://sonarcloud.io" `
             /d:sonar.verbose=true
 
@@ -206,7 +226,7 @@ jobs:
 
           base = "https://sonarcloud.io"
           token = os.environ["SONAR_TOKEN"]
-          project_key = read_prop("sonar.projectKey")
+          project_key = os.environ.get("SONAR_PROJECT_KEY") or "UNKNOWN"
           print(f"Project: {project_key}")
 
           # Wait for most recent CE task to finish
@@ -277,6 +297,8 @@ jobs:
               json.dump(sarif, f, ensure_ascii=False)
           print(f"Wrote {len(issues)} issues to reports/sonarcloud.sarif")
           EOF
+          # Make SONAR_PROJECT_KEY available to the Python step for nicer logging
+          echo "SONAR_PROJECT_KEY=${SONAR_PROJECT_KEY}" >> $GITHUB_ENV
           python reports/generate_sarif.py
 
       # Keep an auditable copy of the SARIF. Do not upload secrets.
