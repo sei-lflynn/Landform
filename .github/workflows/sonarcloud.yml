@@ -114,29 +114,56 @@ jobs:
           persist-credentials: false     # Do not leave a token in .git/config
 
       # MSBuild scanner rule: it will FAIL if any sonar-project.properties exists in the repo.
-      # We read the needed keys from the file(s) once, export them into the job environment,
-      # then remove ALL sonar-project.properties files before running 'begin'.
+      # MSBuild scanner rule: it will FAIL if any sonar-project.properties exists in the repo.
+      # We parse keys once, export them into the job env, then remove ALL sonar-project.properties
+      # before running 'begin'. This version is robust to whitespace and missing files, and
+      # falls back to secrets if the file isn't present or doesn't contain the keys.
       - name: Extract Sonar keys and remove sonar-project.properties (required for MSBuild scanner)
         shell: pwsh
         run: |
-          $files = Get-ChildItem -Path . -Recurse -Filter 'sonar-project.properties' -File
+          Set-StrictMode -Version Latest
+
+          $proj = $null
+          $org  = $null
+
+          # Find any sonar-project.properties files (root or subfolders)
+          $files = Get-ChildItem -Path . -Recurse -Filter 'sonar-project.properties' -File -ErrorAction SilentlyContinue
+
           if ($files) {
-            # Read first file for keys (usually root); later files typically repeat the same values.
-            $text = Get-Content -Path $files[0].FullName -Raw
-            $proj = ($text | Select-String -Pattern '^sonar\.projectKey=(.+)$').Matches.Groups[1].Value
-            $org  = ($text | Select-String -Pattern '^sonar\.organization=(.+)$').Matches.Groups[1].Value
-            if ($proj) { Add-Content $env:GITHUB_ENV "SONAR_PROJECT_KEY=$proj" }
-            if ($org)  { Add-Content $env:GITHUB_ENV "SONAR_ORG=$org" }
-            # Remove every sonar-project.properties to satisfy the MSBuild scanner
-            $files | ForEach-Object { Remove-Item $_.FullName -Force }
+            $primary = $files | Select-Object -First 1
+            Write-Host "Reading Sonar keys from: $($primary.FullName)"
+
+            # Read line-by-line and tolerate whitespace around '='
+            $lines = Get-Content -Path $primary.FullName -Encoding UTF8
+            foreach ($line in $lines) {
+              if (-not $proj) {
+                $m = [regex]::Match($line, '^\s*sonar\.projectKey\s*=\s*(.+?)\s*$')
+                if ($m.Success) { $proj = $m.Groups[1].Value.Trim() }
+              }
+              if (-not $org) {
+                $m = [regex]::Match($line, '^\s*sonar\.organization\s*=\s*(.+?)\s*$')
+                if ($m.Success) { $org = $m.Groups[1].Value.Trim() }
+              }
+            }
+
+            # Remove every sonar-project.properties to satisfy the MSBuild scanner rule
+            $files | ForEach-Object { Write-Host "Removing $($_.FullName)"; Remove-Item $_.FullName -Force }
           }
-          # Optional: allow secrets to override (useful if you remove the file from the repo later)
-          if ($env:SONAR_PROJECT_KEY -eq $null -or $env:SONAR_PROJECT_KEY -eq '') {
-            if ($env:SONAR_PROJECT_KEY_SECRET) { Add-Content $env:GITHUB_ENV "SONAR_PROJECT_KEY=$env:SONAR_PROJECT_KEY_SECRET" }
+          else {
+            Write-Host "No sonar-project.properties found; will rely on secrets if provided."
           }
-          if ($env:SONAR_ORG -eq $null -or $env:SONAR_ORG -eq '') {
-            if ($env:SONAR_ORG_SECRET) { Add-Content $env:GITHUB_ENV "SONAR_ORG=$env:SONAR_ORG_SECRET" }
+
+          # Allow secrets to provide/override values (set these in repo → Settings → Secrets → Actions)
+          if (-not $proj -and $env:SONAR_PROJECT_KEY_SECRET) { $proj = $env:SONAR_PROJECT_KEY_SECRET }
+          if (-not $org  -and $env:SONAR_ORG_SECRET)        { $org  = $env:SONAR_ORG_SECRET }
+
+          if (-not $proj -or -not $org) {
+            throw "Could not determine SONAR_PROJECT_KEY/SONAR_ORG. Provide a sonar-project.properties file with those keys OR set secrets SONAR_PROJECT_KEY_SECRET and SONAR_ORG_SECRET."
           }
+
+          "SONAR_PROJECT_KEY=$proj" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SONAR_ORG=$org"         | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
 
       # Cache the packages/ folder used by packages.config projects to speed up subsequent builds
       # NOTE: We use a tag here for reliability; if you require pin-by-SHA, replace @v4 with a specific commit SHA.
