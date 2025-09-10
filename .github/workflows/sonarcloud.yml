@@ -173,7 +173,7 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
           $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
-          dotnet-sonarscanner end /d:sonar.login="$env:SONAR_TOKEN"
+          dotnet-sonarscanner end
 
       # Convert SonarCloud issues → SARIF so GitHub Code Scanning can ingest them.
       # Why a custom step? SonarCloud doesn’t publish SARIF directly, so we fetch issues via API and transcode.
