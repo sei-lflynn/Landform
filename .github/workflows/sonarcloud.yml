@@ -178,6 +178,14 @@ jobs:
         with:
           msbuild-architecture: x64
 
+      # SonarScanner CLI requires Java 17 (class file v61). Install Temurin JDK 17.
+      # NOTE: using @v4 tag for readability; pin to a commit SHA if you require strict pinning.
+      - name: Setup Java 17 for SonarScanner
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
       # Begin SonarScanner for .NET
       - name: SonarScanner begin
         shell: pwsh
